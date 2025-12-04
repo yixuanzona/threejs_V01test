@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模型小櫥窗 - Abracadabra</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #0f1012;
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+        }
+
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        .info-text {
+            position: absolute;
+            top: 40px;
+            left: 40px;
+            color: rgba(255, 255, 255, 0.8);
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        h1 {
+            font-weight: 300;
+            margin: 0;
+            letter-spacing: 4px;
+            font-size: 1.5rem;
+            text-transform: uppercase;
+        }
+
+        .subtitle {
+            font-size: 0.9rem;
+            margin-top: 5px;
+            opacity: 0.6;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 75%;
+            background: #fff;
+            cursor: pointer;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="info-text">
+        <h1>Custom Model Showcase</h1>
+        <div class="subtitle">ABRACADABRA by Jaenam</div>
+        <div class="mt-4 text-sm text-white-400 max-w-xs">
+            Raymarching 變形方塊效果<br>
+            移動滑鼠可旋轉櫥窗視角
+        </div>
+    </div>
+
+    <div id="control-panel"
+        class="absolute top-4 right-4 z-10 p-4 rounded-lg bg-white/20 backdrop-blur-sm shadow-xl space-y-3 w-64 text-sm text-white/90">
+        <div class="flex flex-col space-y-2">
+            <label for="exposureSlider" class="font-bold">環境亮度 (Exposure):</label>
+            <div class="flex items-center space-x-2">
+                <input type="range" id="exposureSlider" min="0.5" max="5.0" step="0.1" value="1.0"
+                    class="w-full h-1 bg-white/50 rounded-lg appearance-none cursor-pointer">
+                <span id="exposureValue" class="font-mono text-xs w-8 text-right">1.0</span>
+            </div>
+        </div>
+
+        <div class="flex items-center justify-between pt-2">
+            <label for="hdriToggle" class="font-bold">HDRI 背景圖</label>
+            <input type="checkbox" id="hdriToggle"
+                class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500">
+        </div>
+        
+        <div class="flex flex-col space-y-2 pt-2">
+            <label for="speedSlider" class="font-bold">動畫速度:</label>
+            <div class="flex items-center space-x-2">
+                <input type="range" id="speedSlider" min="0.1" max="2.0" step="0.1" value="1.0"
+                    class="w-full h-1 bg-white/50 rounded-lg appearance-none cursor-pointer">
+                <span id="speedValue" class="font-mono text-xs w-8 text-right">1.0x</span>
+            </div>
+        </div>
+    </div>
+
+    <button id="resetViewButton"
+        class="absolute bottom-5 left-1/2 transform -translate-x-1/2 z-10 py-2 px-4 rounded-full bg-white/20 backdrop-blur-sm shadow-xl text-white/90 hover:bg-white/30 transition duration-150">
+        回到正面視角
+    </button>
+
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+        import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+
+        // --- 全域變數 ---
+        let scene, camera, renderer, controls;
+        let glassCube, shaderPlane;
+        let myModelGroup = new THREE.Group();
+        let mouse = new THREE.Vector2();
+        let windowHalfX = window.innerWidth / 2;
+        let windowHalfY = window.innerHeight / 2;
+        let hdrTexture = null;
+        let animationSpeed = 1.0;
+        
+        // Shader uniforms
+        let abracadabraUniforms = {
+            iTime: { value: 0.0 },
+            iTimeDelta: { value: 0.016 },
+            iResolution: { value: new THREE.Vector3(1024, 1024, 1) }
+        };
+
+        // --- 初始化 ---
+        function init() {
+            const container = document.getElementById('canvas-container');
+
+            // 1. 場景
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x080808);
+            scene.fog = new THREE.FogExp2(0x080808, 0.015);
+
+            // 2. 相機
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.5, 9);
+
+            // 3. 渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制像素比以提升效能
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.0;
+            container.appendChild(renderer.domElement);
+
+            // 4. 控制器
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minPolarAngle = Math.PI / 3;
+            controls.maxPolarAngle = Math.PI / 1.8;
+            controls.minAzimuthAngle = -Math.PI / 4;
+            controls.maxAzimuthAngle = Math.PI / 4;
+            controls.enablePan = false;
+            controls.enableZoom = false;
+
+            // 5. 環境貼圖 (HDRI)
+            setupEnvironment();
+
+            // 6. 燈光
+            setupLighting();
+
+            // 7. 建立玻璃櫥窗
+            createGlassCube();
+
+            // 8. 建立 Abracadabra Shader 
+            createAbracadabraShader();
+            scene.add(myModelGroup);
+
+            // 9. 事件監聽
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousemove', onDocumentMouseMove);
+
+            // UI 事件監聽
+            document.getElementById('hdriToggle').addEventListener('change', toggleHdriBackground);
+            document.getElementById('exposureSlider').addEventListener('input', updateExposure);
+            document.getElementById('speedSlider').addEventListener('input', updateSpeed);
+            document.getElementById('resetViewButton').addEventListener('click', resetCameraView);
+
+            // 10. 啟動迴圈
+            animate(0);
+        }
+
+        // --- Abracadabra Shader ---
+        function createAbracadabraShader() {
+            
+            const vertexShader = `
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `;
+
+            // Jaenam's Abracadabra - 完整移植版
+            const fragmentShader = `
+                precision highp float;
+                
+                uniform float iTime;
+                uniform float iTimeDelta;
+                uniform vec3 iResolution;
+                varying vec2 vUv;
+                
+                #define S smoothstep
+
+                void main() {
+                    vec2 fragCoord = vUv * iResolution.xy;
+                    
+                    // Motion blur time offset
+                    float t = iTime + fract(1e4 * sin(dot(fragCoord, vec2(137.0, -13.0)))) * iTimeDelta;
+                    
+                    float i, d, s, m, l;
+                    float x = abs(mod(t / 4.0, 2.0) - 1.0);
+                    
+                    // Elastic easing
+                    float a;
+                    if (x < 0.5) {
+                        a = -(exp2(12.0 * x - 6.0) * sin((20.0 * x - 11.125) * 1.396)) / 2.0;
+                    } else {
+                        a = (exp2(-12.0 * x + 6.0) * sin((20.0 * x - 11.125) * 1.396)) / 2.0 + 1.0;
+                    }
+                    
+                    vec3 p, k;
+                    vec3 r = iResolution;
+                    
+                    vec4 O = vec4(0.0);
+                    d = 0.0;
+                    m = 1.0;
+                    
+                    for (float ii = 0.0; ii < 100.0; ii++) {
+                        i = ii;
+                        
+                        k = vec3((fragCoord + fragCoord - r.xy) / r.y * d, d - 9.0);
+                        
+                        if (abs(k.x) > 6.0) break;
+                        
+                        l = length(0.2 * k.xy - vec2(sin(t) / 9.0, 0.6 + sin(t * 2.0) / 9.0));
+                        
+                        // Floor reflection
+                        if (k.y < -5.0) {
+                            k.y = -k.y - 10.0;
+                            m = 0.5;
+                        } else {
+                            m = 1.0;
+                        }
+                        
+                        // Rotation
+                        float angle = a * 6.28 + k.y * 0.3 * S(0.2, 0.5, x) * S(0.7, 0.5, x);
+                        float c = cos(angle);
+                        float sn = sin(angle);
+                        k.xz = mat2(c, -sn, sn, c) * k.xz;
+                        
+                        // Morphing
+                        p = k * 0.5;
+                        s = 0.01;
+                        for (int j = 0; j < 8; j++) {
+                            if (s >= 1.0) break;
+                            vec3 sinVal = sin(p.x + 2.0 * t + p / s);
+                            p.y += 0.95 + abs(dot(sinVal, vec3(0.2))) * s;
+                            s += s;
+                        }
+                        
+                        l = mix(sin(length(k * k.x)), mix(sin(length(p)), l, 0.5 - l), S(5.5, 6.0, p.y));
+                        
+                        p = abs(k);
+                        float maxP = max(max(p.x, p.y), p.z);
+                        float dotP = dot(p, vec3(0.577)) * mix(0.5, 0.9, a);
+                        float dist = max(sin(length(k) + l), max(maxP, dotP) - 3.0) - i / 100.0;
+                        
+                        s = 0.012 + 0.09 * abs(dist);
+                        d += s;
+                        
+                        // Color accumulation
+                        vec4 col = max(sin(vec4(0.5, 1.5, 2.5, 1.0) + i * 0.5) * 1.3 / s, -length(k * k));
+                        O += col;
+                    }
+                    
+                    // Final color with tanh tone mapping
+                    O = tanh(O * O / 1e6) * m;
+                    
+                    // 計算亮度作為 alpha 值，讓黑色部分透明
+                    float brightness = max(max(O.r, O.g), O.b);
+                    float alpha = smoothstep(0.01, 0.15, brightness); // 黑色變透明，亮色不透明
+                    float fadeBottom = smoothstep(0.0, 0.08, vUv.y);
+                    alpha *= fadeBottom;
+                    float intensity = 0.5;  //調整加法混合的強度 (數字越小越暗)
+                    gl_FragColor = vec4(O.rgb * intensity, alpha);
+                }
+            `;
+
+            const material = new THREE.ShaderMaterial({
+                uniforms: abracadabraUniforms,
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader,
+                side: THREE.DoubleSide,
+                transparent: true,  // 開啟透明
+                depthWrite: false,  // 避免透明物件的深度問題
+                blending: THREE.AdditiveBlending // 加法混合，讓發光效果更好
+            });
+
+            // 使用平面，面向相機
+            const geometry = new THREE.PlaneGeometry(3.2, 3.2);
+            shaderPlane = new THREE.Mesh(geometry, material);
+            shaderPlane.renderOrder = 1; // 確保在玻璃之後渲染
+            
+            // 讓平面永遠面向相機（在 animate 中更新）
+            myModelGroup.add(shaderPlane);
+        }
+
+        // --- 環境貼圖 (HDRI) 設置 ---
+        function setupEnvironment() {
+            new RGBELoader()
+                .setPath('./assets/hdri/')
+                .load('rogland_clear_night_1k.hdr', function (texture) {
+                    hdrTexture = texture;
+                    texture.mapping = THREE.EquirectangularReflectionMapping;
+                    scene.environment = hdrTexture;
+                    // 預設不顯示 HDRI 背景，讓 shader 效果更突出
+                }, undefined, function(err) {
+                    console.log('HDRI 載入失敗，使用預設背景');
+                });
+        }
+
+        // --- 燈光設置 ---
+        function setupLighting() {
+            RectAreaLightUniformsLib.init();
+
+            const ambientLight = new THREE.AmbientLight(0xffeedd, 0.3);
+            scene.add(ambientLight);
+
+            const spotLight = new THREE.SpotLight(0xffeedd, 3);
+            spotLight.position.set(0, 10, 0);
+            spotLight.angle = Math.PI / 6;
+            spotLight.penumbra = 1;
+            spotLight.decay = 2;
+            spotLight.distance = 50;
+            spotLight.castShadow = true;
+            scene.add(spotLight);
+
+            const rectLight1 = new THREE.RectAreaLight(0x99ddff, 1.5, 2, 10);
+            rectLight1.position.set(-5, 0, 0);
+            rectLight1.lookAt(0, 0, 0);
+            scene.add(rectLight1);
+
+            const rectLight2 = new THREE.RectAreaLight(0xffccaa, 1.5, 2, 10);
+            rectLight2.position.set(5, 0, 0);
+            rectLight2.lookAt(0, 0, 0);
+            scene.add(rectLight2);
+        }
+
+        // --- 建立玻璃櫥窗 ---
+        function createGlassCube() {
+            const geometry = new THREE.BoxGeometry(3.5, 3.5, 3.5);
+
+            // 更透明的玻璃，讓 shader 效果更清晰
+            const frostedGlass = new THREE.MeshPhysicalMaterial({
+                color: 0xffffff,
+                metalness: 0.0,
+                roughness: 0.3,
+                //transparent: true,
+                //opacity: 0.3
+                transmission: 0.7,
+                thickness: 1.0,
+                side: THREE.BackSide,
+                clearcoat: 0.1,
+                clearcoatRoughness: 0.4
+            });
+
+            const clearGlass = new THREE.MeshPhysicalMaterial({
+                color: 0xffffff,
+                metalness: 0.0,
+                roughness: 0.05,
+                //transmission: 0.99,
+                //thickness: 0.3,
+                transparent: true,
+                opacity: 0.1,
+                side: THREE.FrontSide,
+                clearcoat: 0.5,
+                //ior: 1.45,
+            });
+
+            const materials = [
+                frostedGlass, frostedGlass, frostedGlass,
+                null, null, frostedGlass
+            ];
+
+            glassCube = new THREE.Mesh(geometry, materials);
+            scene.add(glassCube);
+
+            // 邊框
+            const edges = new THREE.EdgesGeometry(geometry);
+            const lineMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.2, transparent: true });
+            const wireframe = new THREE.LineSegments(edges, lineMaterial);
+            glassCube.add(wireframe);
+
+            // 底座
+            const baseGeo = new THREE.BoxGeometry(3.6, 0.2, 3.6);
+            const baseMat = new THREE.MeshStandardMaterial({
+                color: 0x1a1a1a,
+                roughness: 0.3,
+                metalness: 0.8
+            });
+            const base = new THREE.Mesh(baseGeo, baseMat);
+            base.position.y = -1.85;
+            scene.add(base);
+        }
+
+        // --- UI 功能 ---
+        function toggleHdriBackground(event) {
+            if (event.target.checked && hdrTexture) {
+                scene.background = hdrTexture;
+            } else {
+                scene.background = new THREE.Color(0x080808);
+            }
+        }
+
+        function updateExposure(event) {
+            const exposure = parseFloat(event.target.value);
+            renderer.toneMappingExposure = exposure;
+            document.getElementById('exposureValue').innerText = exposure.toFixed(1);
+        }
+
+        function updateSpeed(event) {
+            animationSpeed = parseFloat(event.target.value);
+            document.getElementById('speedValue').innerText = animationSpeed.toFixed(1) + 'x';
+        }
+
+        function resetCameraView() {
+            camera.position.set(0, 1.5, 9);
+            myModelGroup.rotation.x = 0;
+            myModelGroup.rotation.y = 0;
+            controls.reset();
+            mouse.set(0, 0);
+        }
+
+        // --- 事件處理 ---
+        function onWindowResize() {
+            windowHalfX = window.innerWidth / 2;
+            windowHalfY = window.innerHeight / 2;
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function onDocumentMouseMove(event) {
+            mouse.x = (event.clientX - windowHalfX) / 100;
+            mouse.y = (event.clientY - windowHalfY) / 100;
+        }
+
+        // --- 動畫迴圈 ---
+        let lastTime = 0;
+        function animate(currentTime) {
+            requestAnimationFrame(animate);
+
+            const deltaTime = (currentTime - lastTime) / 1000;
+            lastTime = currentTime;
+            
+            // 更新 Shader 時間
+            abracadabraUniforms.iTime.value += 0.016 * animationSpeed;
+            abracadabraUniforms.iTimeDelta.value = (deltaTime || 0.016) * animationSpeed;
+
+            // 讓 shader 平面始終面向相機
+            if (shaderPlane) {
+                shaderPlane.lookAt(camera.position);
+            }
+
+            // 互動：模型跟隨滑鼠
+            if (myModelGroup && myModelGroup.children.length > 0) {
+                const targetRotationX = mouse.y * 0.05;
+                const targetRotationY = mouse.x * 0.1;
+
+                const damping = 0.08;
+                myModelGroup.rotation.x += (targetRotationX - myModelGroup.rotation.x) * damping;
+                myModelGroup.rotation.y += (targetRotationY - myModelGroup.rotation.y) * damping;
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+
+</html>
